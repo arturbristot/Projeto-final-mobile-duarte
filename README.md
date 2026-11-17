@@ -86,9 +86,9 @@ Abra o app **Expo Go** no celular e leia o QR Code (o celular e o computador pre
 
 ## Equipe
 
-- _Nome completo do integrante 1_
-- _Nome completo do integrante 2_
-- _Nome completo do integrante 3_
-- _Nome completo do integrante 4_
+- _Artur Bristot Rocha
+- _Eric Garcia
+- _Guilherme Brignolli
+
 
 Professora: Mariane Joaquim Melo
