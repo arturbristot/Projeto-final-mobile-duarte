@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
@@ -8,30 +8,96 @@ import {
   signOut,
 } from 'firebase/auth';
 import { auth } from '../config/firebase';
-import { salvarEstabelecimento } from '../services/estabelecimento';
+import {
+  criarPerfilBarbearia,
+  criarPerfilCliente,
+  observarPerfil,
+  salvarPerfil,
+  TIPO,
+} from '../services/perfil';
 
 const AuthContext = createContext(undefined);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [perfil, setPerfil] = useState(null);
   const [carregando, setCarregando] = useState(true);
+  const [erroPerfil, setErroPerfil] = useState(null);
+  // Durante o cadastro o perfil ainda não existe no banco; não pode ser "migrado".
+  const cadastrando = useRef(false);
 
   useEffect(() => {
-    // Dispara ao abrir o app (sessão salva) e a cada login/logout.
-    return onAuthStateChanged(auth, (usuario) => {
-      setUser(usuario);
+    let pararPerfil = () => {};
+
+    function falhaNaMigracao(erro) {
+      setErroPerfil(erro);
       setCarregando(false);
+    }
+
+    // Dispara ao abrir o app (sessão salva) e a cada login/logout.
+    const pararAuth = onAuthStateChanged(auth, (usuario) => {
+      pararPerfil();
+      setUser(usuario);
+      setPerfil(null);
+      setErroPerfil(null);
+
+      if (!usuario) {
+        setCarregando(false);
+        return;
+      }
+
+      setCarregando(true);
+      pararPerfil = observarPerfil(
+        usuario.uid,
+        (snap) => {
+          // Sem internet o cache pode vir vazio: espera a resposta do servidor.
+          if (!snap.exists() && (snap.metadata.fromCache || cadastrando.current)) return;
+
+          if (!snap.exists()) {
+            // Conta criada antes da área do cliente: só existiam barbearias.
+            criarPerfilBarbearia(usuario.uid, usuario.displayName || 'Minha barbearia').catch(
+              falhaNaMigracao,
+            );
+            return;
+          }
+
+          const dados = snap.data();
+          if (!dados.tipo) {
+            salvarPerfil(usuario.uid, { tipo: TIPO.BARBEIRO }).catch(falhaNaMigracao);
+            return;
+          }
+
+          setPerfil({ id: snap.id, ...dados });
+          setCarregando(false);
+        },
+        (erro) => {
+          setErroPerfil(erro);
+          setCarregando(false);
+        },
+      );
     });
+
+    return () => {
+      pararAuth();
+      pararPerfil();
+    };
   }, []);
 
   async function entrar(email, senha) {
     await signInWithEmailAndPassword(auth, email.trim(), senha);
   }
 
-  async function cadastrar(nomeNegocio, email, senha) {
-    const { user: novo } = await createUserWithEmailAndPassword(auth, email.trim(), senha);
-    await updateProfile(novo, { displayName: nomeNegocio });
-    await salvarEstabelecimento(novo.uid, { nome: nomeNegocio, endereco: '', telefone: '' });
+  /** Cria a conta de barbearia ou de cliente com o perfil correspondente. */
+  async function cadastrar({ tipo, nome, telefone, email, senha }) {
+    cadastrando.current = true;
+    try {
+      const { user: novo } = await createUserWithEmailAndPassword(auth, email.trim(), senha);
+      await updateProfile(novo, { displayName: nome });
+      if (tipo === TIPO.CLIENTE) await criarPerfilCliente(novo.uid, { nome, telefone });
+      else await criarPerfilBarbearia(novo.uid, nome);
+    } finally {
+      cadastrando.current = false;
+    }
   }
 
   async function recuperarSenha(email) {
@@ -48,7 +114,17 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, carregando, entrar, cadastrar, recuperarSenha, sair, obterToken }}
+      value={{
+        user,
+        perfil,
+        carregando,
+        erroPerfil,
+        entrar,
+        cadastrar,
+        recuperarSenha,
+        sair,
+        obterToken,
+      }}
     >
       {children}
     </AuthContext.Provider>

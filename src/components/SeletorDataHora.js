@@ -7,9 +7,9 @@ import { formatarDataCurta, formatarHora } from '../utils/format';
 
 /**
  * Escolha de data e hora. No Android o seletor abre como diálogo;
- * no iOS usa o estilo "compact" nativo.
+ * no iOS usa o estilo "compact" nativo. `somenteData` esconde a hora.
  */
-export function SeletorDataHora({ valor, onChange }) {
+export function SeletorDataHora({ valor, onChange, somenteData = false }) {
   const [modoAndroid, setModoAndroid] = useState(null);
 
   function aoAlterar(evento, data) {
@@ -28,15 +28,17 @@ export function SeletorDataHora({ valor, onChange }) {
           locale="pt-BR"
           onChange={aoAlterar}
         />
-        <DateTimePicker
-          value={valor}
-          mode="time"
-          display="compact"
-          themeVariant="dark"
-          locale="pt-BR"
-          minuteInterval={5}
-          onChange={aoAlterar}
-        />
+        {!somenteData && (
+          <DateTimePicker
+            value={valor}
+            mode="time"
+            display="compact"
+            themeVariant="dark"
+            locale="pt-BR"
+            minuteInterval={5}
+            onChange={aoAlterar}
+          />
+        )}
       </View>
     );
   }
@@ -48,11 +50,13 @@ export function SeletorDataHora({ valor, onChange }) {
         texto={formatarDataCurta(valor)}
         onPress={() => setModoAndroid('date')}
       />
-      <BotaoCampo
-        icone="time-outline"
-        texto={formatarHora(valor)}
-        onPress={() => setModoAndroid('time')}
-      />
+      {!somenteData && (
+        <BotaoCampo
+          icone="time-outline"
+          texto={formatarHora(valor)}
+          onPress={() => setModoAndroid('time')}
+        />
+      )}
       {modoAndroid && (
         <DateTimePicker value={valor} mode={modoAndroid} is24Hour onChange={aoAlterar} />
       )}

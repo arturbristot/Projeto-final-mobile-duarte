@@ -1,14 +1,183 @@
 rules_version = '2';
 
-// Cada usuário (dono do salão) só pode ler e escrever os próprios dados.
-// O token de acesso do Firebase Auth é validado automaticamente em cada requisição.
+// Regras de segurança do MarcaAí.
+//
+// Quem acessa o quê:
+// - Barbearia (dono): tudo dentro de usuarios/{seu uid}.
+// - Cliente: lê o perfil público das barbearias, os serviços e os horários
+//   ocupados (só início/fim); cria pedidos "pendentes" em nome próprio, vê e
+//   cancela apenas os próprios agendamentos. Nunca vê dados de outros clientes.
+//
+// Toda gravação é validada aqui no servidor com os mesmos limites do app
+// (src/utils/validacao.js e src/utils/financeiro.js).
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /usuarios/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
 
-      match /{subcolecao}/{docId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+    function logado() {
+      return request.auth != null;
+    }
+
+    function ehDono(uid) {
+      return logado() && request.auth.uid == uid;
+    }
+
+    function texto(valor, min, max) {
+      return valor is string && valor.size() >= min && valor.size() <= max;
+    }
+
+    function nomeValido(valor) {
+      return texto(valor, 2, 60);
+    }
+
+    function hora(valor) {
+      return valor is string && valor.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
+    }
+
+    function ehBarbearia(uid) {
+      return get(/databases/$(database)/documents/usuarios/$(uid)).data.get('tipo', '') == 'barbeiro';
+    }
+
+    // ---------- Perfis ----------
+
+    function funcionamentoValido(f) {
+      return f is map
+        && f.dias is list && f.dias.size() >= 1 && f.dias.size() <= 7
+        && hora(f.abertura) && hora(f.fechamento) && f.fechamento > f.abertura
+        && f.intervaloMin in [15, 30, 60];
+    }
+
+    function perfilBarbeariaValido(d) {
+      return d.keys().hasOnly(['tipo', 'nome', 'endereco', 'telefone', 'latitude', 'longitude', 'funcionamento'])
+        && nomeValido(d.nome)
+        && texto(d.get('endereco', ''), 0, 200)
+        && texto(d.get('telefone', ''), 0, 20)
+        && d.get('latitude', 0) is number
+        && d.get('longitude', 0) is number
+        && (!('funcionamento' in d) || funcionamentoValido(d.funcionamento));
+    }
+
+    function perfilClienteValido(d) {
+      return d.keys().hasOnly(['tipo', 'nome', 'telefone'])
+        && nomeValido(d.nome)
+        && texto(d.telefone, 10, 20);
+    }
+
+    function perfilValido(d) {
+      return (d.tipo == 'barbeiro' && perfilBarbeariaValido(d))
+        || (d.tipo == 'cliente' && perfilClienteValido(d));
+    }
+
+    // ---------- Dados da barbearia ----------
+
+    function servicoValido(d) {
+      return d.keys().hasOnly(['nome', 'preco', 'duracaoMin'])
+        && nomeValido(d.nome)
+        && d.preco is number && d.preco >= 0 && d.preco <= 10000
+        && d.duracaoMin is int && d.duracaoMin >= 5 && d.duracaoMin <= 480;
+    }
+
+    function clienteValido(d) {
+      return d.keys().hasOnly(['nome', 'telefone', 'observacoes'])
+        && nomeValido(d.nome)
+        && texto(d.telefone, 10, 20)
+        && texto(d.get('observacoes', ''), 0, 500);
+    }
+
+    function despesaValida(d) {
+      return d.keys().hasOnly(['descricao', 'valor', 'categoria', 'data'])
+        && texto(d.descricao, 2, 80)
+        && d.valor is number && d.valor > 0 && d.valor <= 100000
+        && d.categoria in ['Aluguel', 'Produtos', 'Contas', 'Equipamentos', 'Salários', 'Outros']
+        && d.data is timestamp;
+    }
+
+    function agendamentoValido(d) {
+      return d.keys().hasOnly([
+          'clienteId', 'clienteUid', 'clienteNome', 'clienteTelefone',
+          'servicoId', 'servicoNome', 'preco', 'duracaoMin', 'data', 'status',
+          'origem', 'formaPagamento'])
+        && texto(d.clienteId, 1, 128) && nomeValido(d.clienteNome)
+        && texto(d.clienteTelefone, 10, 20)
+        && texto(d.servicoId, 1, 128) && nomeValido(d.servicoNome)
+        && d.preco is number && d.preco >= 0 && d.preco <= 10000
+        && d.duracaoMin is int && d.duracaoMin >= 5 && d.duracaoMin <= 480
+        && d.data is timestamp
+        && d.status in ['pendente', 'agendado', 'concluido', 'cancelado', 'recusado']
+        && d.get('formaPagamento', null) in [null, 'dinheiro', 'pix', 'cartao'];
+    }
+
+    function caminhoAgendamento(uid, id) {
+      return /databases/$(database)/documents/usuarios/$(uid)/agendamentos/$(id);
+    }
+
+    // Cliente pedindo um horário: em nome próprio, sempre "pendente", no futuro.
+    function pedidoDoCliente(uid, d) {
+      return logado() && !ehDono(uid) && ehBarbearia(uid)
+        && d.clienteUid == request.auth.uid && d.clienteId == request.auth.uid
+        && d.status == 'pendente' && d.origem == 'app'
+        && !('formaPagamento' in d)
+        && d.data > request.time;
+    }
+
+    // Cliente cancelando: só muda o status, só do que é dele e ainda está aberto.
+    function cancelamentoDoCliente() {
+      return logado()
+        && resource.data.get('clienteUid', '') == request.auth.uid
+        && resource.data.status in ['pendente', 'agendado']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status == 'cancelado';
+    }
+
+    function ocupadoValido(d) {
+      return d.keys().hasOnly(['inicio', 'fim'])
+        && d.inicio is timestamp && d.fim is timestamp && d.fim > d.inicio;
+    }
+
+    match /usuarios/{uid} {
+      // Perfil da barbearia é público para quem está logado; o do cliente é privado.
+      allow get: if ehDono(uid) || (logado() && resource.data.tipo == 'barbeiro');
+      allow list: if logado() && resource.data.tipo == 'barbeiro';
+      allow create: if ehDono(uid) && perfilValido(request.resource.data);
+      // O tipo da conta não muda (contas antigas sem tipo podem recebê-lo uma vez).
+      allow update: if ehDono(uid) && perfilValido(request.resource.data)
+        && (resource.data.get('tipo', null) == null
+            || request.resource.data.tipo == resource.data.tipo);
+      allow delete: if false;
+
+      match /servicos/{id} {
+        allow read: if logado();
+        allow create, update: if ehDono(uid) && servicoValido(request.resource.data);
+        allow delete: if ehDono(uid);
+      }
+
+      match /clientes/{id} {
+        allow read, delete: if ehDono(uid);
+        allow create, update: if ehDono(uid) && clienteValido(request.resource.data);
+      }
+
+      match /despesas/{id} {
+        allow read, delete: if ehDono(uid);
+        allow create, update: if ehDono(uid) && despesaValida(request.resource.data);
+      }
+
+      match /agendamentos/{id} {
+        allow read: if ehDono(uid)
+          || (logado() && resource.data.clienteUid == request.auth.uid);
+        allow create: if agendamentoValido(request.resource.data)
+          && (ehDono(uid) || pedidoDoCliente(uid, request.resource.data));
+        allow update: if (ehDono(uid) && agendamentoValido(request.resource.data))
+          || cancelamentoDoCliente();
+        allow delete: if ehDono(uid);
+      }
+
+      // Espelho só com início/fim, para o cliente ver horários livres.
+      match /ocupados/{id} {
+        allow read: if logado();
+        allow create, update: if ocupadoValido(request.resource.data)
+          && (ehDono(uid)
+              || getAfter(caminhoAgendamento(uid, id)).data.get('clienteUid', '') == request.auth.uid);
+        allow delete: if ehDono(uid)
+          || (logado() && get(caminhoAgendamento(uid, id)).data.get('clienteUid', '') == request.auth.uid);
       }
     }
   }

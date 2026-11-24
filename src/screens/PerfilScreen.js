@@ -1,15 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Alert, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { updateProfile } from 'firebase/auth';
 import { Botao } from '../components/Botao';
 import { Campo } from '../components/Campo';
+import { Opcoes } from '../components/Opcoes';
 import { TelaFormulario } from '../components/TelaFormulario';
 import { useAuth, useUid } from '../contexts/AuthContext';
-import { buscarEstabelecimento, salvarEstabelecimento } from '../services/estabelecimento';
-import { colors, radius, spacing } from '../theme';
+import { avisarErro, avisarSePendente, gravar } from '../services/operacao';
+import { salvarPerfil } from '../services/perfil';
+import { colors, fonts, radius, spacing } from '../theme';
 import { formatarTelefone } from '../utils/format';
+import { DIAS_SEMANA, FUNCIONAMENTO_PADRAO, validarFuncionamento } from '../utils/horarios';
+import { LIMITES } from '../utils/validacao';
 
 /** Centro inicial do mapa quando o local ainda não foi definido (Criciúma/SC). */
 const REGIAO_PADRAO = {
@@ -19,27 +23,35 @@ const REGIAO_PADRAO = {
   longitudeDelta: 0.05,
 };
 
+const OPCOES_DIAS = DIAS_SEMANA.map((rotulo, valor) => ({ valor, rotulo }));
+const OPCOES_INTERVALO = [15, 30, 60].map((v) => ({ valor: v, rotulo: `${v} min` }));
+
+/** Formata enquanto digita: "930" -> "09:30". */
+function mascaraHora(texto) {
+  const d = texto.replace(/\D/g, '').slice(0, 4);
+  return d.length <= 2 ? d : `${d.slice(0, d.length - 2).padStart(2, '0')}:${d.slice(-2)}`;
+}
+
 export default function PerfilScreen() {
   const uid = useUid();
-  const { user, sair } = useAuth();
-  const [nome, setNome] = useState('');
-  const [endereco, setEndereco] = useState('');
-  const [telefone, setTelefone] = useState('');
-  const [local, setLocal] = useState();
+  const { user, perfil, sair } = useAuth();
+  const funcionamentoAtual = perfil?.funcionamento ?? FUNCIONAMENTO_PADRAO;
+
+  const [nome, setNome] = useState(perfil?.nome ?? '');
+  const [endereco, setEndereco] = useState(perfil?.endereco ?? '');
+  const [telefone, setTelefone] = useState(perfil?.telefone ?? '');
+  const [local, setLocal] = useState(
+    perfil?.latitude !== undefined && perfil?.longitude !== undefined
+      ? { latitude: perfil.latitude, longitude: perfil.longitude }
+      : undefined,
+  );
+  const [dias, setDias] = useState(funcionamentoAtual.dias);
+  const [abertura, setAbertura] = useState(funcionamentoAtual.abertura);
+  const [fechamento, setFechamento] = useState(funcionamentoAtual.fechamento);
+  const [intervaloMin, setIntervaloMin] = useState(funcionamentoAtual.intervaloMin);
+  const [erros, setErros] = useState({});
   const [salvando, setSalvando] = useState(false);
   const [localizando, setLocalizando] = useState(false);
-
-  useEffect(() => {
-    buscarEstabelecimento(uid).then((e) => {
-      if (!e) return;
-      setNome(e.nome);
-      setEndereco(e.endereco);
-      setTelefone(e.telefone);
-      if (e.latitude !== undefined && e.longitude !== undefined) {
-        setLocal({ latitude: e.latitude, longitude: e.longitude });
-      }
-    });
-  }, [uid]);
 
   async function usarMinhaLocalizacao() {
     setLocalizando(true);
@@ -83,27 +95,39 @@ export default function PerfilScreen() {
       ios: `maps:0,0?q=${rotulo}@${latitude},${longitude}`,
       default: `geo:0,0?q=${latitude},${longitude}(${rotulo})`,
     });
-    Linking.openURL(url);
+    Linking.openURL(url).catch(() => Alert.alert('Erro', 'Nenhum app de mapas encontrado.'));
   }
 
   async function handleSalvar() {
-    if (nome.trim().length < 2) {
-      Alert.alert('Atenção', 'Informe o nome do negócio.');
-      return;
-    }
+    const funcionamento = {
+      dias: [...dias].sort((a, b) => a - b),
+      abertura,
+      fechamento,
+      intervaloMin,
+    };
+    const { erros: e } = validarFuncionamento(funcionamento);
+    const nomeLimpo = nome.trim();
+    if (nomeLimpo.length < LIMITES.nomeMin) e.nome = 'Informe o nome do negócio.';
+    setErros(e);
+    if (Object.keys(e).length) return;
+
     setSalvando(true);
     try {
-      await salvarEstabelecimento(uid, {
-        nome: nome.trim(),
-        endereco: endereco.trim(),
-        telefone,
-        latitude: local?.latitude,
-        longitude: local?.longitude,
-      });
-      if (user) await updateProfile(user, { displayName: nome.trim() });
-      Alert.alert('Pronto!', 'Dados do negócio atualizados.');
-    } catch {
-      Alert.alert('Erro', 'Não foi possível salvar.');
+      const resultado = await gravar(() =>
+        salvarPerfil(uid, {
+          nome: nomeLimpo,
+          endereco: endereco.trim(),
+          telefone,
+          latitude: local?.latitude,
+          longitude: local?.longitude,
+          funcionamento,
+        }),
+      );
+      if (user) updateProfile(user, { displayName: nomeLimpo }).catch(() => {});
+      if (resultado === 'salvo') Alert.alert('Pronto!', 'Dados do negócio atualizados.');
+      else avisarSePendente(resultado);
+    } catch (erro) {
+      avisarErro(erro);
     } finally {
       setSalvando(false);
     }
@@ -122,7 +146,13 @@ export default function PerfilScreen() {
     <TelaFormulario>
       <Text style={styles.email}>Conectado como {user?.email}</Text>
 
-      <Campo rotulo="Nome do negócio" value={nome} onChangeText={setNome} />
+      <Campo
+        rotulo="Nome do negócio"
+        value={nome}
+        onChangeText={setNome}
+        maxLength={LIMITES.nomeMax}
+        erro={erros.nome}
+      />
       <Campo
         rotulo="Telefone"
         value={telefone}
@@ -135,9 +165,50 @@ export default function PerfilScreen() {
         value={endereco}
         onChangeText={setEndereco}
         placeholder="Rua, número, bairro"
+        maxLength={200}
       />
 
-      <Text style={styles.rotulo}>Localização no mapa</Text>
+      <Text style={styles.secao}>Horário de funcionamento</Text>
+      <Text style={styles.dica}>Os clientes só conseguem marcar dentro destes horários.</Text>
+      <Opcoes
+        rotulo="Dias de atendimento"
+        opcoes={OPCOES_DIAS}
+        valor={dias}
+        onChange={setDias}
+        multipla
+        erro={erros.dias}
+      />
+      <View style={styles.linha}>
+        <View style={styles.flex}>
+          <Campo
+            rotulo="Abre às"
+            value={abertura}
+            onChangeText={(t) => setAbertura(mascaraHora(t))}
+            keyboardType="number-pad"
+            placeholder="09:00"
+            erro={erros.abertura}
+          />
+        </View>
+        <View style={styles.flex}>
+          <Campo
+            rotulo="Fecha às"
+            value={fechamento}
+            onChangeText={(t) => setFechamento(mascaraHora(t))}
+            keyboardType="number-pad"
+            placeholder="19:00"
+            erro={erros.fechamento}
+          />
+        </View>
+      </View>
+      <Opcoes
+        rotulo="Horários de"
+        opcoes={OPCOES_INTERVALO}
+        valor={intervaloMin}
+        onChange={setIntervaloMin}
+        erro={erros.intervalo}
+      />
+
+      <Text style={styles.secao}>Localização no mapa</Text>
       <Text style={styles.dica}>Toque no mapa para posicionar o marcador.</Text>
       <View style={styles.mapaContainer}>
         <MapView
@@ -179,8 +250,15 @@ export default function PerfilScreen() {
 
 const styles = StyleSheet.create({
   email: { color: colors.textMuted, marginBottom: spacing.md },
-  rotulo: { fontSize: 14, fontWeight: '600', color: colors.text },
-  dica: { fontSize: 13, color: colors.textMuted, marginBottom: spacing.sm },
+  secao: {
+    fontSize: 19,
+    fontFamily: fonts.titulo,
+    color: colors.primary,
+    marginTop: spacing.md,
+  },
+  dica: { fontSize: 13, color: colors.textMuted, marginBottom: spacing.md },
+  linha: { flexDirection: 'row', gap: spacing.sm },
+  flex: { flex: 1 },
   mapaContainer: {
     borderRadius: radius.md,
     overflow: 'hidden',

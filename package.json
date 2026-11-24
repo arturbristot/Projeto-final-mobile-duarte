@@ -24,11 +24,24 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "eslint .",
+    "test": "jest",
+    "test:regras": "npx firebase-tools emulators:exec --only firestore --project demo-marcaai 'npx jest --config regras/jest.config.js'"
   },
   "private": true,
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
     "eslint": "^9.0.0",
-    "eslint-config-expo": "~58.0.4"
+    "eslint-config-expo": "~58.0.4",
+    "globals": "^17.14.0",
+    "jest": "~30.5.2",
+    "jest-expo": "~58.0.15"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/regras/"
+    ]
   }
 }

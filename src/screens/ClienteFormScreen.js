@@ -1,19 +1,26 @@
 import React, { useEffect, useLayoutEffect, useState } from 'react';
-import { Alert, StyleSheet, Text, View } from 'react-native';
-import { getDoc } from 'firebase/firestore';
+import { StyleSheet, Text, View } from 'react-native';
 import { Botao } from '../components/Botao';
 import { Campo } from '../components/Campo';
+import { Carregando } from '../components/Carregando';
 import { Cartao } from '../components/Cartao';
 import { TelaFormulario } from '../components/TelaFormulario';
 import { useUid } from '../contexts/AuthContext';
-import { buscarHistoricoCliente } from '../services/agendamentos';
-import { atualizarCliente, criarCliente, excluirCliente } from '../services/clientes';
-import { refDocumento } from '../services/firestore';
+import { useRegistro } from '../hooks/useRegistro';
+import { buscarAgendamentosFuturos, buscarHistoricoCliente } from '../services/agendamentos';
+import {
+  atualizarCliente,
+  buscarClientePorTelefone,
+  criarCliente,
+  excluirCliente,
+} from '../services/clientes';
+import { buscarDocumento } from '../services/firestore';
+import { avisarErro, avisarSePendente, gravar } from '../services/operacao';
 import { colors, fonts, spacing } from '../theme';
-import { confirmarExclusao } from '../utils/confirmar';
-import { apenasDigitos, formatarDataCurta, formatarMoeda, formatarTelefone } from '../utils/format';
-
-const rotuloStatus = { agendado: 'Agendado', concluido: 'Concluído', cancelado: 'Cancelado' };
+import { avisarExclusaoBloqueada, confirmarExclusao } from '../utils/confirmar';
+import { formatarDataCurta, formatarMoeda, formatarTelefone } from '../utils/format';
+import { ROTULO_STATUS, STATUS } from '../utils/status';
+import { LIMITES, validarCliente } from '../utils/validacao';
 
 export default function ClienteFormScreen({ navigation, route }) {
   const uid = useUid();
@@ -31,51 +38,73 @@ export default function ClienteFormScreen({ navigation, route }) {
     navigation.setOptions({ title: editando ? 'Cliente' : 'Novo cliente' });
   }, [navigation, editando]);
 
-  useEffect(() => {
-    if (!clienteId) return;
-    getDoc(refDocumento(uid, 'clientes', clienteId)).then((snap) => {
-      const c = snap.data();
-      if (!c) return;
+  const carregando = useRegistro({
+    id: clienteId,
+    buscar: (id) => buscarDocumento(uid, 'clientes', id),
+    aoCarregar: (c) => {
       setNome(c.nome);
       setTelefone(c.telefone);
       setObservacoes(c.observacoes ?? '');
-    });
-    buscarHistoricoCliente(uid, clienteId).then(setHistorico);
+    },
+    navigation,
+  });
+
+  useEffect(() => {
+    if (!clienteId) return;
+    // O histórico é complementar: se falhar, o formulário continua utilizável.
+    buscarHistoricoCliente(uid, clienteId)
+      .then(setHistorico)
+      .catch(() => setHistorico([]));
   }, [uid, clienteId]);
 
-  function validar() {
-    const e = {};
-    if (nome.trim().length < 2) e.nome = 'Informe o nome do cliente.';
-    if (apenasDigitos(telefone).length < 10) e.telefone = 'Informe o telefone com DDD.';
-    setErros(e);
-    if (Object.keys(e).length) return null;
-    return { nome: nome.trim(), telefone, observacoes: observacoes.trim() };
-  }
-
   async function handleSalvar() {
-    const dados = validar();
-    if (!dados) return;
+    const { valido, erros: e, dados } = validarCliente({ nome, telefone, observacoes });
+    setErros(e);
+    if (!valido) return;
+
     setSalvando(true);
     try {
-      if (clienteId) await atualizarCliente(uid, clienteId, dados);
-      else await criarCliente(uid, dados);
+      const repetido = await buscarClientePorTelefone(uid, dados.telefone, clienteId).catch(
+        () => null, // sem conexão: não impede o cadastro
+      );
+      if (repetido) {
+        setErros({ telefone: `Este telefone já é do cliente ${repetido.nome}.` });
+        setSalvando(false);
+        return;
+      }
+
+      const resultado = await gravar(() =>
+        clienteId ? atualizarCliente(uid, clienteId, dados) : criarCliente(uid, dados),
+      );
+      avisarSePendente(resultado);
       navigation.goBack();
-    } catch {
-      Alert.alert('Erro', 'Não foi possível salvar o cliente.');
+    } catch (erro) {
+      avisarErro(erro);
       setSalvando(false);
     }
   }
 
-  function handleExcluir() {
-    if (!clienteId) return;
+  async function handleExcluir() {
+    try {
+      const futuros = await buscarAgendamentosFuturos(uid, 'clienteId', clienteId);
+      if (futuros.length) {
+        avisarExclusaoBloqueada(`O cliente ${nome}`, futuros.length);
+        return;
+      }
+    } catch (erro) {
+      avisarErro(erro);
+      return;
+    }
     confirmarExclusao(`o cliente "${nome}"`, async () => {
-      await excluirCliente(uid, clienteId);
+      await gravar(() => excluirCliente(uid, clienteId));
       navigation.goBack();
     });
   }
 
+  if (carregando) return <Carregando />;
+
   const totalGasto = historico
-    .filter((a) => a.status === 'concluido')
+    .filter((a) => a.status === STATUS.CONCLUIDO)
     .reduce((soma, a) => soma + a.preco, 0);
 
   return (
@@ -85,6 +114,7 @@ export default function ClienteFormScreen({ navigation, route }) {
         value={nome}
         onChangeText={setNome}
         placeholder="Nome completo"
+        maxLength={LIMITES.nomeMax}
         erro={erros.nome}
       />
       <Campo
@@ -101,7 +131,9 @@ export default function ClienteFormScreen({ navigation, route }) {
         onChangeText={setObservacoes}
         placeholder="Preferências, alergias, etc."
         multiline
+        maxLength={LIMITES.observacoesMax}
         style={styles.multilinha}
+        erro={erros.observacoes}
       />
 
       <View style={styles.acoes}>
@@ -137,7 +169,7 @@ export default function ClienteFormScreen({ navigation, route }) {
                 <Text style={styles.data}>{formatarDataCurta(a.data)}</Text>
               </View>
               <Text style={styles.status}>
-                {rotuloStatus[a.status]} · {formatarMoeda(a.preco)}
+                {ROTULO_STATUS[a.status]} · {formatarMoeda(a.preco)}
               </Text>
             </Cartao>
           ))}

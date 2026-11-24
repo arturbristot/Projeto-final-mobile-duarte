@@ -1,4 +1,5 @@
 import { Alert } from 'react-native';
+import { avisarErro } from '../services/operacao';
 
 /** Pede confirmação antes de uma ação destrutiva (ex.: excluir). */
 export function confirmarExclusao(descricao, aoConfirmar) {
@@ -11,11 +12,17 @@ export function confirmarExclusao(descricao, aoConfirmar) {
         text: 'Excluir',
         style: 'destructive',
         onPress: () => {
-          aoConfirmar().catch(() =>
-            Alert.alert('Erro', 'Não foi possível excluir. Tente novamente.'),
-          );
+          aoConfirmar().catch(avisarErro);
         },
       },
     ],
+  );
+}
+
+/** Explica por que um item não pode ser excluído enquanto tiver horários marcados. */
+export function avisarExclusaoBloqueada(item, quantidade) {
+  Alert.alert(
+    'Não é possível excluir',
+    `${item} tem ${quantidade} horário(s) marcado(s). Cancele ou conclua esses horários antes de excluir.`,
   );
 }

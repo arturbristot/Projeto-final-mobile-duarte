@@ -42,3 +42,9 @@ yarn-error.*
 
 # credenciais do Firebase
 .env
+
+# logs do emulador do Firebase
+*-debug.log
+
+# pacotes de commits gerados localmente
+*.bundle

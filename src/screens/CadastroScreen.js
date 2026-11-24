@@ -3,36 +3,51 @@ import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Botao } from '../components/Botao';
 import { Campo } from '../components/Campo';
+import { Opcoes } from '../components/Opcoes';
 import { TelaFormulario } from '../components/TelaFormulario';
 import { mensagemErroAuth, useAuth } from '../contexts/AuthContext';
+import { TIPO } from '../services/perfil';
 import { colors, fonts, spacing } from '../theme';
+import { formatarTelefone } from '../utils/format';
+import { validarCadastro } from '../utils/validacao';
+
+const TIPOS = [
+  { valor: TIPO.CLIENTE, rotulo: 'Sou cliente', icone: 'person-outline' },
+  { valor: TIPO.BARBEIRO, rotulo: 'Tenho uma barbearia', icone: 'cut-outline' },
+];
 
 export default function CadastroScreen({ navigation }) {
   const { cadastrar } = useAuth();
+  const [tipo, setTipo] = useState(TIPO.CLIENTE);
   const [nome, setNome] = useState('');
+  const [telefone, setTelefone] = useState('');
   const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
   const [confirmacao, setConfirmacao] = useState('');
   const [erros, setErros] = useState({});
   const [carregando, setCarregando] = useState(false);
-
-  function validar() {
-    const e = {};
-    if (nome.trim().length < 2) e.nome = 'Informe o nome do salão ou barbearia.';
-    if (!/^\S+@\S+\.\S+$/.test(email.trim())) e.email = 'E-mail inválido.';
-    if (senha.length < 6) e.senha = 'Mínimo de 6 caracteres.';
-    if (confirmacao !== senha) e.confirmacao = 'As senhas não conferem.';
-    return e;
-  }
+  const ehCliente = tipo === TIPO.CLIENTE;
 
   async function handleCadastrar() {
-    const e = validar();
+    const {
+      valido,
+      erros: e,
+      dados,
+    } = validarCadastro({
+      tipo,
+      nome,
+      telefone,
+      email,
+      senha,
+      confirmacao,
+    });
     setErros(e);
-    if (Object.keys(e).length) return;
+    if (!valido) return;
 
     setCarregando(true);
     try {
-      await cadastrar(nome.trim(), email, senha);
+      await cadastrar(dados);
+      // Ao criar a conta o usuário já fica logado e a navegação troca sozinha.
     } catch (err) {
       setErros({ geral: mensagemErroAuth(err) });
       setCarregando(false);
@@ -44,16 +59,33 @@ export default function CadastroScreen({ navigation }) {
       <TelaFormulario>
         <View style={styles.topo}>
           <Text style={styles.titulo}>Criar conta</Text>
-          <Text style={styles.subtitulo}>Cadastre seu negócio e comece a organizar a agenda.</Text>
+          <Text style={styles.subtitulo}>
+            {ehCliente
+              ? 'Marque seus horários sem precisar mandar mensagem.'
+              : 'Cadastre seu negócio e organize a agenda.'}
+          </Text>
         </View>
 
+        <Opcoes opcoes={TIPOS} valor={tipo} onChange={setTipo} />
+
         <Campo
-          rotulo="Nome do negócio"
+          rotulo={ehCliente ? 'Seu nome' : 'Nome do negócio'}
           value={nome}
           onChangeText={setNome}
-          placeholder="Ex.: Barbearia do Zé"
+          placeholder={ehCliente ? 'Nome completo' : 'Ex.: Duarte Barbearia'}
+          maxLength={60}
           erro={erros.nome}
         />
+        {ehCliente && (
+          <Campo
+            rotulo="Telefone (WhatsApp)"
+            value={telefone}
+            onChangeText={(t) => setTelefone(formatarTelefone(t))}
+            placeholder="(48) 99999-0000"
+            keyboardType="phone-pad"
+            erro={erros.telefone}
+          />
+        )}
         <Campo
           rotulo="E-mail"
           value={email}
@@ -61,6 +93,7 @@ export default function CadastroScreen({ navigation }) {
           placeholder="voce@exemplo.com"
           keyboardType="email-address"
           autoCapitalize="none"
+          autoComplete="email"
           erro={erros.email}
         />
         <Campo

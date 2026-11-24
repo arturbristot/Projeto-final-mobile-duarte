@@ -1,15 +1,18 @@
-import React, { useEffect, useLayoutEffect, useState } from 'react';
-import { Alert, StyleSheet, View } from 'react-native';
-import { getDoc } from 'firebase/firestore';
+import React, { useLayoutEffect, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { Botao } from '../components/Botao';
 import { Campo } from '../components/Campo';
+import { Carregando } from '../components/Carregando';
 import { TelaFormulario } from '../components/TelaFormulario';
 import { useUid } from '../contexts/AuthContext';
-import { refDocumento } from '../services/firestore';
+import { useRegistro } from '../hooks/useRegistro';
+import { buscarAgendamentosFuturos } from '../services/agendamentos';
+import { buscarDocumento } from '../services/firestore';
+import { avisarErro, avisarSePendente, gravar } from '../services/operacao';
 import { atualizarServico, criarServico, excluirServico } from '../services/servicos';
 import { spacing } from '../theme';
-import { confirmarExclusao } from '../utils/confirmar';
-import { lerNumero } from '../utils/format';
+import { avisarExclusaoBloqueada, confirmarExclusao } from '../utils/confirmar';
+import { LIMITES, validarServico } from '../utils/validacao';
 
 export default function ServicoFormScreen({ navigation, route }) {
   const uid = useUid();
@@ -26,49 +29,53 @@ export default function ServicoFormScreen({ navigation, route }) {
     navigation.setOptions({ title: editando ? 'Editar serviço' : 'Novo serviço' });
   }, [navigation, editando]);
 
-  useEffect(() => {
-    if (!servicoId) return;
-    getDoc(refDocumento(uid, 'servicos', servicoId)).then((snap) => {
-      const s = snap.data();
-      if (!s) return;
+  const carregando = useRegistro({
+    id: servicoId,
+    buscar: (id) => buscarDocumento(uid, 'servicos', id),
+    aoCarregar: (s) => {
       setNome(s.nome);
       setPreco(s.preco.toFixed(2).replace('.', ','));
       setDuracao(String(s.duracaoMin));
-    });
-  }, [uid, servicoId]);
-
-  function validar() {
-    const e = {};
-    const valor = lerNumero(preco);
-    const minutos = parseInt(duracao, 10);
-    if (!nome.trim()) e.nome = 'Informe o nome do serviço.';
-    if (isNaN(valor) || valor < 0) e.preco = 'Informe um preço válido.';
-    if (isNaN(minutos) || minutos < 5) e.duracao = 'Duração mínima de 5 minutos.';
-    setErros(e);
-    return Object.keys(e).length ? null : { nome: nome.trim(), preco: valor, duracaoMin: minutos };
-  }
+    },
+    navigation,
+  });
 
   async function handleSalvar() {
-    const dados = validar();
-    if (!dados) return;
+    const { valido, erros: e, dados } = validarServico({ nome, preco, duracao });
+    setErros(e);
+    if (!valido) return;
+
     setSalvando(true);
     try {
-      if (servicoId) await atualizarServico(uid, servicoId, dados);
-      else await criarServico(uid, dados);
+      const resultado = await gravar(() =>
+        servicoId ? atualizarServico(uid, servicoId, dados) : criarServico(uid, dados),
+      );
+      avisarSePendente(resultado);
       navigation.goBack();
-    } catch {
-      Alert.alert('Erro', 'Não foi possível salvar o serviço.');
+    } catch (erro) {
+      avisarErro(erro);
       setSalvando(false);
     }
   }
 
-  function handleExcluir() {
-    if (!servicoId) return;
+  async function handleExcluir() {
+    try {
+      const futuros = await buscarAgendamentosFuturos(uid, 'servicoId', servicoId);
+      if (futuros.length) {
+        avisarExclusaoBloqueada(`O serviço "${nome}"`, futuros.length);
+        return;
+      }
+    } catch (erro) {
+      avisarErro(erro);
+      return;
+    }
     confirmarExclusao(`o serviço "${nome}"`, async () => {
-      await excluirServico(uid, servicoId);
+      await gravar(() => excluirServico(uid, servicoId));
       navigation.goBack();
     });
   }
+
+  if (carregando) return <Carregando />;
 
   return (
     <TelaFormulario>
@@ -77,6 +84,7 @@ export default function ServicoFormScreen({ navigation, route }) {
         value={nome}
         onChangeText={setNome}
         placeholder="Ex.: Corte masculino"
+        maxLength={LIMITES.nomeMax}
         erro={erros.nome}
       />
       <Campo
@@ -85,13 +93,15 @@ export default function ServicoFormScreen({ navigation, route }) {
         onChangeText={setPreco}
         placeholder="0,00"
         keyboardType="decimal-pad"
+        maxLength={9}
         erro={erros.preco}
       />
       <Campo
         rotulo="Duração (minutos)"
         value={duracao}
-        onChangeText={setDuracao}
+        onChangeText={(t) => setDuracao(t.replace(/\D/g, ''))}
         keyboardType="number-pad"
+        maxLength={3}
         erro={erros.duracao}
       />
       <View style={styles.acoes}>

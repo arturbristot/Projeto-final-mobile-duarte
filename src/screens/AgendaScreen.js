@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BotaoFlutuante } from '../components/BotaoFlutuante';
@@ -6,7 +6,12 @@ import { Cartao } from '../components/Cartao';
 import { ListaVazia } from '../components/ListaVazia';
 import { useAuth, useUid } from '../contexts/AuthContext';
 import { useColecao } from '../hooks/useColecao';
-import { observarAgendamentosDoDia } from '../services/agendamentos';
+import { SeloStatus, COR_STATUS } from '../components/SeloStatus';
+import {
+  observarAgendamentosDoDia,
+  observarPendentes,
+  sincronizarHorariosOcupados,
+} from '../services/agendamentos';
 import { colors, fonts, radius, spacing } from '../theme';
 import {
   formatarDataLonga,
@@ -16,28 +21,33 @@ import {
   mesmoDia,
   somarDias,
 } from '../utils/format';
+import { STATUS, statusOcupaHorario } from '../utils/status';
 import { enviarLembreteWhatsApp } from '../utils/whatsapp';
-
-const estiloStatus = {
-  agendado: { rotulo: 'Agendado', cor: colors.primary },
-  concluido: { rotulo: 'Concluído', cor: colors.success },
-  cancelado: { rotulo: 'Cancelado', cor: colors.danger },
-};
 
 export default function AgendaScreen({ navigation }) {
   const uid = useUid();
-  const { user } = useAuth();
+  const { perfil } = useAuth();
   const [dia, setDia] = useState(() => inicioDoDia(new Date()));
   const { itens: agendamentos, carregando } = useColecao(
     (cb, aoErro) => observarAgendamentosDoDia(uid, dia, cb, aoErro),
     [uid, dia.getTime()],
   );
+  const { itens: pendentes } = useColecao(
+    (cb, aoErro) => observarPendentes(uid, cb, aoErro),
+    [uid],
+  );
 
-  const ativos = agendamentos.filter((a) => a.status !== 'cancelado');
+  useEffect(() => {
+    // Garante que agendamentos antigos bloqueiem horários na área do cliente.
+    sincronizarHorariosOcupados(uid).catch(() => {});
+  }, [uid]);
+
+  const ativos = agendamentos.filter((a) => statusOcupaHorario(a.status));
   const previsto = ativos.reduce((soma, a) => soma + a.preco, 0);
   const recebido = ativos
-    .filter((a) => a.status === 'concluido')
+    .filter((a) => a.status === STATUS.CONCLUIDO)
     .reduce((soma, a) => soma + a.preco, 0);
+  const nomeNegocio = perfil?.nome ?? 'nossa barbearia';
   const ehHoje = mesmoDia(dia, new Date());
 
   return (
@@ -67,6 +77,22 @@ export default function AgendaScreen({ navigation }) {
         </Pressable>
       </View>
 
+      {pendentes.length > 0 && (
+        <Pressable
+          style={styles.avisoPendentes}
+          onPress={() => navigation.navigate('Pendentes')}
+          accessibilityRole="button"
+        >
+          <Ionicons name="notifications" size={20} color={colors.onPrimary} />
+          <Text style={styles.textoPendentes}>
+            {pendentes.length === 1
+              ? '1 pedido de horário aguardando você'
+              : `${pendentes.length} pedidos de horário aguardando você`}
+          </Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.onPrimary} />
+        </Pressable>
+      )}
+
       <View style={styles.resumo}>
         <Indicador valor={String(ativos.length)} rotulo="Atendimentos" />
         <Indicador valor={formatarMoeda(previsto)} rotulo="Previsto" />
@@ -88,15 +114,15 @@ export default function AgendaScreen({ navigation }) {
             />
           }
           renderItem={({ item }) => {
-            const status = estiloStatus[item.status];
+            const cor = COR_STATUS[item.status];
             return (
               <Cartao
                 onPress={() => navigation.navigate('AgendamentoForm', { agendamentoId: item.id })}
-                style={item.status === 'cancelado' ? styles.cancelado : undefined}
+                style={statusOcupaHorario(item.status) ? undefined : styles.cancelado}
               >
                 <View style={styles.linha}>
-                  <View style={[styles.hora, { borderColor: status.cor }]}>
-                    <Text style={[styles.textoHora, { color: status.cor }]}>
+                  <View style={[styles.hora, { borderColor: cor }]}>
+                    <Text style={[styles.textoHora, { color: cor }]}>
                       {formatarHora(item.data)}
                     </Text>
                   </View>
@@ -105,13 +131,11 @@ export default function AgendaScreen({ navigation }) {
                     <Text style={styles.servico}>
                       {item.servicoNome} · {formatarMoeda(item.preco)}
                     </Text>
-                    <Text style={[styles.status, { color: status.cor }]}>{status.rotulo}</Text>
+                    <SeloStatus status={item.status} />
                   </View>
-                  {item.status === 'agendado' && (
+                  {item.status === STATUS.AGENDADO && (
                     <Pressable
-                      onPress={() =>
-                        enviarLembreteWhatsApp(item, user?.displayName ?? 'nosso salão')
-                      }
+                      onPress={() => enviarLembreteWhatsApp(item, nomeNegocio)}
                       hitSlop={10}
                       accessibilityLabel={`Enviar lembrete para ${item.clienteNome}`}
                     >
@@ -190,6 +214,16 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   cliente: { fontSize: 16, fontWeight: '600', color: colors.text },
   servico: { fontSize: 13, color: colors.textMuted, marginTop: 2 },
-  status: { fontSize: 12, fontWeight: '600', marginTop: 4 },
+  avisoPendentes: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.warning,
+  },
+  textoPendentes: { flex: 1, color: colors.onPrimary, fontWeight: '700' },
   cancelado: { opacity: 0.55 },
 });
